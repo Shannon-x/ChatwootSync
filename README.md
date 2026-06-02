@@ -300,6 +300,21 @@ curl https://your-xboard.com/api/v1/plugin/chatwoot/widget.js
 4. **widget.js** 已设 `Cache-Control: no-store`，CDN 不会缓存
 5. **回填命令** 限速 200ms 默认值保护 Chatwoot 不被打爆
 6. **account_id 校验** 阻断别的 Chatwoot 账号误推的 webhook
+7. **localStorage token 探测** 对通用 key（`token` / `access_token`）要求 `Bearer ` 前缀，防止其他 SDK 写入的无关字符串被误用为 auth header
+8. **其他客服 widget 共存检测** 自动检测页面是否已加载 Crisp / Intercom / Tawk / Zendesk / Freshchat / LiveChat，若有则退出避免双气泡冲突
+9. **XSS 风险**：widget.js 从 localStorage 读 token 后通过 Authorization Header 发到 identity 端点。如果站点有 XSS 漏洞，攻击者可直接读 localStorage 拿到 token——widget 不增加新风险，但提供了便利的探测路径。**建议**：含 UGC 的站点应改用 httpOnly cookie + 服务端 widget-identity 代理
+
+## 多站点部署
+
+一个 ChatwootSync 实例可以服务多个前端站点，前提：
+
+- **所有站点共用同一个 Xboard 后端**（token 在哪个 Xboard 签发就只在哪个 Xboard 能验证）
+- **Chatwoot Inbox 的 Allowed Domains 包含所有前端域名**（用逗号分隔）
+- 每个站点 `<script src>` 都指向同一个 `/api/v1/plugin/chatwoot/widget.js`
+
+如果各站点用**不同的 Chatwoot Inbox**：需要在每个 Xboard 实例上**单独装一份 ChatwootSync 插件**，配各自的 `widget_token` / `hmac_secret`。
+
+如果各站点有**别家客服 widget**（Crisp/Intercom 等）：本插件检测到会自动退出。需要先**移除别家 widget** 才能使用。
 
 ---
 

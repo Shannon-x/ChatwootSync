@@ -8,12 +8,13 @@
       $has_hmac_secret    bool    后端是否已配置 hmac_secret
 
     设计要点 — "智能共存"：
-      用户可能已经在 HTML 里放了 Chatwoot 官方嵌入脚本（含 chatwootSettings +
-      自行加载 sdk.js + chatwootSDK.run）。本脚本自动检测这种情况，仅接管
-      "身份注入"（fetch identity → setUser），不重复加载 SDK、不重复 run。
+      1. 同页已有 Chatwoot 官方嵌入脚本：本脚本只接管身份注入，不重复加载/run
+      2. 同页已有其他客服厂商（Crisp/Intercom/Tawk/Zendesk/Freshchat）：本脚本
+         直接退出，避免双气泡冲突（R2 加固）
+      3. localStorage 'token' 这类通用 key 必须以 "Bearer " 前缀才被信任，
+         防止其他 SDK 写入的无关字符串被误用为 auth token（R5 加固）
 
-    JSON_HEX_* flags 防 </script> 注入逃逸（深度防御，即便我们以 external
-    script 返回，admin 配置值仍可能被复用到其他位置）。
+    JSON_HEX_* flags 防 </script> 注入逃逸（深度防御）。
 --}}
 // ChatwootSync widget @ {{ date('c') }}
 (function (d, t) {
@@ -24,6 +25,17 @@
 
   if (window.__chatwootSyncLoaded) return;
   window.__chatwootSyncLoaded = true;
+
+  // ---------- R2: 检测同页其他客服 widget，避免双气泡 ----------
+  function detectCompetingChatWidget() {
+    if (window.$crisp || window.CRISP_WEBSITE_ID) return 'Crisp';
+    if (window.Intercom || window.intercomSettings) return 'Intercom';
+    if (window.Tawk_API) return 'Tawk.to';
+    if (window.zE || window.zESettings) return 'Zendesk';
+    if (window.fcWidget) return 'Freshchat';
+    if (window.LiveChatWidget) return 'LiveChat';
+    return null;
+  }
 
   // ---------- 检测：SDK 是否已被其他脚本处理 ----------
   function sdkHandledElsewhere() {
@@ -36,7 +48,7 @@
     return false;
   }
 
-  // ---------- "SDK 就绪后回调"（多路径接住事件 + 永久指数退避轮询）----------
+  // ---------- "SDK 就绪后回调"（多路径接住事件 + 永久指数退避轮询 + 60s 警告）----------
   function whenChatwootReady(cb) {
     var called = false;
     function safe() { if (called) return; called = true; cb(); }
@@ -45,7 +57,14 @@
     window.addEventListener('chatwoot:ready', safe);
     d.addEventListener('chatwoot:ready', safe);
 
-    // 路径 B：轮询兜底——250ms 起步、指数退避到 5s 封顶、不设上限（应对慢网络）
+    // R3: 60s 后还没就绪 → 一次性 console.warn 提示运维查 allowed_domains
+    setTimeout(function () {
+      if (!called && window.console && console.warn) {
+        console.warn('[ChatwootSync] chatwoot:ready not fired after 60s — likely cause: this domain is not in the Chatwoot inbox allowed_domains list, or sdk.js failed to load');
+      }
+    }, 60000);
+
+    // 路径 B：轮询兜底——250ms 起步、指数退避到 5s 封顶、不设上限
     var delay = 250;
     function tick() {
       if (called) return;
@@ -59,34 +78,47 @@
     setTimeout(tick, delay);
   }
 
+  // ---------- R5: token 探测，对通用 key 加 heuristic 校验 ----------
+  // 通用 key（token / access_token）必须以 "Bearer " 开头才被信任，
+  // 避免误用其他 SDK 写入的无关字符串
+  var GENERIC_KEYS = { 'token': 1, 'access_token': 1 };
+  var MIN_TOKEN_LENGTH = 20;  // Sanctum token 通常 40+ 字符
+
   function readToken() {
-    // Xboard 前端不同版本 / fork 用的 localStorage key 名不一样，按优先级尝试
     var keys = [
       'xb.auth',         // Xboard 新版（值形如 "Bearer xxx"）
       'auth_data',       // Chatwoot SDK 默认 / v2board 旧版
-      'access_token',    // 通用 OAuth-ish key
-      'token',           // 通用兜底
+      'access_token',    // 通用 OAuth-ish key（要求 Bearer 前缀）
+      'token',           // 通用兜底（要求 Bearer 前缀）
     ];
     try {
       for (var i = 0; i < keys.length; i++) {
         var v = window.localStorage.getItem(keys[i]);
-        if (v && typeof v === 'string') {
-          // 值可能是 "Bearer xxx" 或裸 token，统一去掉 "Bearer " 前缀
-          return v.replace(/^Bearer\s+/i, '').trim();
-        }
+        if (!v || typeof v !== 'string') continue;
+
+        var hasBearer = /^Bearer\s+/i.test(v);
+        // 通用 key 必须 Bearer 前缀；命名 key（xb.auth / auth_data）可以裸 token
+        if (GENERIC_KEYS[keys[i]] && !hasBearer) continue;
+
+        var stripped = v.replace(/^Bearer\s+/i, '').trim();
+        if (stripped.length < MIN_TOKEN_LENGTH) continue;
+
+        return stripped;
       }
     } catch (e) {}
     return null;
   }
 
-  // 并发守卫 + 代际计数：防止快速 token 变化导致旧响应覆盖新响应
+  // 并发守卫 + 代际计数 + 负面缓存（R1）：避免反复发送已被拒绝的 token
   var inFlight = false;
   var generation = 0;
+  var lastRejectedToken = null;
 
   function applyIdentity() {
     var token = readToken();
     if (!token) return;
     if (inFlight) return;
+    if (token === lastRejectedToken) return;  // R1: 这个 token 已被拒，别重试
 
     inFlight = true;
     var myGen = ++generation;
@@ -98,8 +130,13 @@
     })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
-        if (myGen !== generation) return;          // 已有更新的请求，丢弃本次结果
-        if (!data || !data.authenticated) return;
+        if (myGen !== generation) return;
+        if (!data) return;
+        if (!data.authenticated) {
+          lastRejectedToken = token;  // 记录拒绝，避免下次同 token 再 fetch
+          return;
+        }
+        lastRejectedToken = null;  // 成功了清缓存（避免 token 轮换后被卡）
         if (!window.$chatwoot || typeof window.$chatwoot.setUser !== 'function') return;
         try {
           window.$chatwoot.setUser(data.identifier, {
@@ -128,24 +165,29 @@
   }
 
   // ---------- 主流程 ----------
+  // R2 优先：发现其他客服 widget 直接退出
+  var competing = detectCompetingChatWidget();
+  if (competing) {
+    if (window.console && console.warn) {
+      console.warn('[ChatwootSync] detected ' + competing + ' widget on this page — aborting to avoid double-launcher conflict. Remove either ' + competing + ' or the ChatwootSync widget.js include.');
+    }
+    return;
+  }
+
   // 1. 立刻检测；如果已被处理，直接进入身份注入
   if (sdkHandledElsewhere()) {
     bootIdentity();
   } else {
-    // 2. 未检测到——等 DOMContentLoaded 后再检测一次。
-    //    这能让"用户脚本和 widget.js 顺序未知"的场景兜底：DOM 解析完毕时
-    //    所有 inline script 都已执行过，sdkHandledElsewhere() 此时再为
-    //    false 才真的需要我们自己加载 SDK。
+    // 2. 未检测到——等 DOMContentLoaded 后再检测一次（兜底脚本顺序）
     var startSelfLoad = function () {
       if (sdkHandledElsewhere()) { bootIdentity(); return; }
 
       var g = d.createElement(t), s = d.getElementsByTagName(t)[0];
       g.src = BASE_URL + '/packs/js/sdk.js';
-      g.async = true;  // 动态 script 默认 async，写明仅为可读性
+      g.async = true;
       s.parentNode.insertBefore(g, s);
       g.onload = function () {
         if (!window.chatwootSDK) return;
-        // 双重防御：onload 触发时若另一脚本恰好已开始 run，不重复 run
         if (window.$chatwoot || window.__chatwootSDKRunInProgress) {
           bootIdentity();
           return;
@@ -168,7 +210,6 @@
   }
 
   // ---------- 监听登录态变化 ----------
-  // 跨标签：storage 事件（HTML 规范：仅在其他标签触发，不在当前标签）
   window.addEventListener('storage', function (e) {
     if (e.key === 'xb.auth' || e.key === 'auth_data' || e.key === 'token' || e.key === 'access_token') {
       try { applyIdentity(); } catch (err) {}
@@ -181,9 +222,9 @@
     var current = readToken();
     if (current && current !== lastToken) {
       lastToken = current;
+      lastRejectedToken = null;  // token 变了，清负面缓存
       try { applyIdentity(); } catch (err) {}
     } else if (!current && lastToken) {
-      // 登出：清空 lastToken，下次登录能重新触发
       lastToken = null;
     }
   }, 2000);
