@@ -98,13 +98,39 @@ Chatwoot → Settings → Integrations → Webhooks → **Add new**
 
 ### 6. Xboard 主题注入 Widget
 
-Xboard 后台 → 主题配置 → 当前主题 → **自定义 HTML** 框，粘贴：
+Xboard 后台 → 主题配置 → 当前主题 → **自定义 HTML** 框。
+
+#### 情况 ①：用户前端和 Xboard API 同域（最常见）
 
 ```html
-<script src="https://your-xboard.com/api/v1/plugin/chatwoot/widget.js" defer></script>
+<script src="/api/v1/plugin/chatwoot/widget.js" defer></script>
 ```
 
-> 把 `your-xboard.com` 换成你的 Xboard 域名（保持 `https://`）。
+> 用相对路径，最省心。
+
+#### 情况 ②：用户前端独立域名（前后端分离，例如管理员域 `admin.example.com`、用户域 `app.example.com`）
+
+**强烈推荐先给用户前端配反代**（让所有 `/api/v1/plugin/chatwoot/*` 走当前域内）。
+
+在用户前端 nginx 加：
+```nginx
+location /api/v1/plugin/chatwoot/ {
+    proxy_pass https://admin.example.com/api/v1/plugin/chatwoot/;
+    proxy_set_header Host admin.example.com;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header Authorization $http_authorization;
+    proxy_ssl_server_name on;
+}
+```
+
+然后注入相对路径 `<script>` 同情况 ①。
+
+#### 情况 ③：用户前端独立且不便配反代
+
+需要在 Xboard 后端配 CORS（默认不开启），并把 widget.js 里 IDENTITY_URL 改成绝对 URL 指向 Xboard 域名。本插件目前默认是相对路径，**这种场景需要小改 [WidgetController.php](Controllers/WidgetController.php) 的 identity_endpoint 字段并加 CORS Header**。
+
+> 一句话总结：**情况 ① 和 ② 都用相对路径，情况 ③ 不推荐**。
 
 ### 7. 存量回填（现有 contact）
 

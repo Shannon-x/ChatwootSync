@@ -47,7 +47,10 @@ class WidgetController extends Controller
             ->view('ChatwootSync::widget', [
                 'base_url' => $baseUrl,
                 'widget_token' => $widgetToken,
-                'identity_endpoint' => url('/api/v1/plugin/chatwoot/widget-identity'),
+                // 相对路径：浏览器自动用当前页面的 origin。
+                // - 用户前端跟 Xboard 同域（或反代）：直接走当前域
+                // - 用户前端独立部署需要 CORS：手动改成绝对 URL，并在 nginx 配 Access-Control-Allow-Origin
+                'identity_endpoint' => '/api/v1/plugin/chatwoot/widget-identity',
                 'has_hmac_secret' => $hmacSecret !== '',
             ])
             ->header('Content-Type', 'application/javascript; charset=utf-8')
