@@ -60,11 +60,18 @@
   }
 
   function readToken() {
+    // Xboard 前端不同版本 / fork 用的 localStorage key 名不一样，按优先级尝试
+    var keys = [
+      'xb.auth',         // Xboard 新版（值形如 "Bearer xxx"）
+      'auth_data',       // Chatwoot SDK 默认 / v2board 旧版
+      'access_token',    // 通用 OAuth-ish key
+      'token',           // 通用兜底
+    ];
     try {
-      var keys = ['auth_data', 'token', 'access_token'];
       for (var i = 0; i < keys.length; i++) {
         var v = window.localStorage.getItem(keys[i]);
         if (v && typeof v === 'string') {
+          // 值可能是 "Bearer xxx" 或裸 token，统一去掉 "Bearer " 前缀
           return v.replace(/^Bearer\s+/i, '').trim();
         }
       }
@@ -163,7 +170,7 @@
   // ---------- 监听登录态变化 ----------
   // 跨标签：storage 事件（HTML 规范：仅在其他标签触发，不在当前标签）
   window.addEventListener('storage', function (e) {
-    if (e.key === 'auth_data' || e.key === 'token' || e.key === 'access_token') {
+    if (e.key === 'xb.auth' || e.key === 'auth_data' || e.key === 'token' || e.key === 'access_token') {
       try { applyIdentity(); } catch (err) {}
     }
   });
