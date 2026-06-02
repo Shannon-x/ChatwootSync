@@ -1,0 +1,73 @@
+{
+    "name": "Chatwoot 用户信息同步",
+    "code": "chatwoot_sync",
+    "version": "1.0.0",
+    "description": "Xboard ↔ Chatwoot 双向同步插件：让 Chatwoot 客服侧栏自动展示客户的 Xboard 套餐/余额/流量等数据；同时把 Chatwoot Web Widget 嵌入 Xboard 用户控制台（自动 Identity Validation，无需用户填邮箱）",
+    "author": "Shannon",
+    "require": {
+        "xboard": ">=1.0.0"
+    },
+    "config": {
+        "chatwoot_base_url": {
+            "type": "string",
+            "default": "",
+            "label": "Chatwoot 地址",
+            "description": "你的 Chatwoot 实例完整地址，不带末尾斜杠，例如 https://chat.example.com",
+            "placeholder": "https://chat.example.com"
+        },
+        "chatwoot_account_id": {
+            "type": "string",
+            "default": "1",
+            "label": "Chatwoot 账号 ID",
+            "description": "登录 Chatwoot 后 URL 中 /accounts/N/ 的 N，一般是 1"
+        },
+        "chatwoot_api_token": {
+            "type": "string",
+            "default": "",
+            "label": "Chatwoot API Token",
+            "description": "Chatwoot → Profile Settings → Access Token；建议为本集成单独建一个 Bot 账号，赋予 Administrator 角色"
+        },
+        "widget_token": {
+            "type": "string",
+            "default": "",
+            "label": "Web Widget Token",
+            "description": "Chatwoot → Settings → Inboxes → 你的 Website Widget → Configuration → Website Token"
+        },
+        "hmac_secret": {
+            "type": "string",
+            "default": "",
+            "label": "Identity Validation HMAC 密钥",
+            "description": "Chatwoot → Settings → Inboxes → 你的 Website Widget → Configuration → Identity Validation → 复制密钥"
+        },
+        "webhook_secret": {
+            "type": "string",
+            "default": "",
+            "label": "Webhook 签名密钥",
+            "description": "你自己生成的随机字符串（建议 16+ 字符），用于验证 Chatwoot 推送的 webhook 真伪。完整 Webhook URL 见下方"
+        },
+        "enable_widget": {
+            "type": "boolean",
+            "default": true,
+            "label": "启用 Widget 自动嵌入",
+            "description": "生成 widget.js 供主题 custom_html 注入；用户登录后自动带 email + identity_hash 接入 Chatwoot"
+        },
+        "enable_push_sync": {
+            "type": "boolean",
+            "default": true,
+            "label": "启用 Xboard → Chatwoot 实时推送",
+            "description": "用户注册/下单/支付/流量重置时，主动把最新信息推送到 Chatwoot 自定义属性"
+        },
+        "enable_telegram_id_match": {
+            "type": "boolean",
+            "default": true,
+            "label": "启用 Telegram ID 匹配",
+            "description": "Contact 没有 email 但 additional_attributes.social_profiles.telegram 有值时，按 v2_user.telegram_id 反向关联"
+        },
+        "login_throttle_minutes": {
+            "type": "string",
+            "default": "5",
+            "label": "登录事件节流（分钟）",
+            "description": "同一用户在 N 分钟内的多次登录只同步 1 次，避免高频刷新"
+        }
+    }
+}
