@@ -47,10 +47,12 @@ class WidgetController extends Controller
             ->view('ChatwootSync::widget', [
                 'base_url' => $baseUrl,
                 'widget_token' => $widgetToken,
-                // 相对路径：浏览器自动用当前页面的 origin。
-                // - 用户前端跟 Xboard 同域（或反代）：直接走当前域
-                // - 用户前端独立部署需要 CORS：手动改成绝对 URL，并在 nginx 配 Access-Control-Allow-Origin
-                'identity_endpoint' => '/api/v1/plugin/chatwoot/widget-identity',
+                // 用当前请求的 scheme+host —— 谁加载 widget.js，IDENTITY_URL 就指向谁。
+                // 三种部署形态都自动兼容：
+                //   ① 同域：from-host = identity-host，浏览器无 CORS preflight
+                //   ② 跨域+反代：从用户前端反代到 Xboard，from-host = 用户前端，identity-host 同
+                //   ③ 跨域+CORS：直接嵌 Xboard 绝对 URL，浏览器走 preflight，identity() 已带 CORS Header
+                'identity_endpoint' => $request->getSchemeAndHttpHost() . '/api/v1/plugin/chatwoot/widget-identity',
                 'has_hmac_secret' => $hmacSecret !== '',
             ])
             ->header('Content-Type', 'application/javascript; charset=utf-8')
@@ -88,17 +90,46 @@ class WidgetController extends Controller
 
         $user = $this->resolveCurrentUser($request);
         if (!$user || empty($user->email)) {
-            return response()->json(['authenticated' => false])
-                ->header('Cache-Control', 'no-store');
+            return $this->withCors($request, response()->json(['authenticated' => false])
+                ->header('Cache-Control', 'no-store'));
         }
 
-        return response()->json([
+        return $this->withCors($request, response()->json([
             'authenticated' => true,
             'identifier' => $user->email,
             'email' => $user->email,
             'name' => $user->email,
             'identifier_hash' => hash_hmac('sha256', $user->email, $hmacSecret),
-        ])->header('Cache-Control', 'private, no-store');
+        ])->header('Cache-Control', 'private, no-store'));
+    }
+
+    /**
+     * CORS preflight 处理（浏览器跨域 fetch 前会自动发 OPTIONS）
+     *
+     * URL: OPTIONS /api/v1/plugin/chatwoot/widget-identity
+     */
+    public function identityPreflight(Request $request): Response
+    {
+        return $this->withCors($request, response('', 204));
+    }
+
+    /**
+     * 给响应附加 CORS Header，允许任意 origin 跨域访问 identity 端点。
+     *
+     * 安全分析：identity 端点只对持有合法 Sanctum Bearer Token 的请求返回身份
+     * 数据，且 fetch 使用 `credentials: 'omit'`（不带 cookie）。攻击者站点
+     * 即使能调到此端点，也必须先取得用户的 sanctum token——而 token 存在
+     * localStorage，只能被同源 JS 读取，跨域 JS 拿不到。因此 `Origin: *` 安全。
+     */
+    private function withCors(Request $request, $response)
+    {
+        $origin = (string) $request->header('Origin', '*');
+        return $response
+            ->header('Access-Control-Allow-Origin', $origin === '' ? '*' : $origin)
+            ->header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+            ->header('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept')
+            ->header('Access-Control-Max-Age', '86400')
+            ->header('Vary', 'Origin');
     }
 
     private function resolveCurrentUser(Request $request): ?User

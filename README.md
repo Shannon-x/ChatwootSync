@@ -100,37 +100,42 @@ Chatwoot → Settings → Integrations → Webhooks → **Add new**
 
 Xboard 后台 → 主题配置 → 当前主题 → **自定义 HTML** 框。
 
-#### 情况 ①：用户前端和 Xboard API 同域（最常见）
+插件内置 CORS 支持 + 自动用当前请求 host 生成 IDENTITY_URL，**以下三种部署形态都开箱可用**：
+
+#### 形态 ①：用户前端和 Xboard 同域
 
 ```html
 <script src="/api/v1/plugin/chatwoot/widget.js" defer></script>
 ```
 
-> 用相对路径，最省心。
+✅ 最简单。浏览器无跨域、无 preflight。
 
-#### 情况 ②：用户前端独立域名（前后端分离，例如管理员域 `admin.example.com`、用户域 `app.example.com`）
+#### 形态 ②：管理域和用户域分离 + nginx 反代（推荐安全场景）
 
-**强烈推荐先给用户前端配反代**（让所有 `/api/v1/plugin/chatwoot/*` 走当前域内）。
-
-在用户前端 nginx 加：
+用户前端 nginx 加：
 ```nginx
 location /api/v1/plugin/chatwoot/ {
     proxy_pass https://admin.example.com/api/v1/plugin/chatwoot/;
     proxy_set_header Host admin.example.com;
-    proxy_set_header X-Forwarded-For $remote_addr;
-    proxy_set_header X-Forwarded-Proto https;
     proxy_set_header Authorization $http_authorization;
     proxy_ssl_server_name on;
 }
 ```
+然后注入相对路径 `<script>`，同形态 ①。
 
-然后注入相对路径 `<script>` 同情况 ①。
+✅ 不暴露管理员域名；零 CORS。
 
-#### 情况 ③：用户前端独立且不便配反代
+#### 形态 ③：直接嵌管理域绝对 URL（最省事）
 
-需要在 Xboard 后端配 CORS（默认不开启），并把 widget.js 里 IDENTITY_URL 改成绝对 URL 指向 Xboard 域名。本插件目前默认是相对路径，**这种场景需要小改 [WidgetController.php](Controllers/WidgetController.php) 的 identity_endpoint 字段并加 CORS Header**。
+```html
+<script src="https://admin.example.com/api/v1/plugin/chatwoot/widget.js" defer></script>
+```
 
-> 一句话总结：**情况 ① 和 ② 都用相对路径，情况 ③ 不推荐**。
+✅ 不用配 nginx。
+⚠️ 用户浏览器会知道管理域名；fetch 有 OPTIONS preflight（性能影响微乎其微）。
+⚠️ 插件已自动加 CORS Header（`Allow-Origin: <Origin>`），无需额外配置。
+
+> **三种都不需要改插件代码**——按你部署情况挑一个即可。
 
 ### 7. 存量回填（现有 contact）
 
