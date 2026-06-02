@@ -42,8 +42,8 @@
         "webhook_secret": {
             "type": "string",
             "default": "",
-            "label": "Webhook 签名密钥",
-            "description": "你自己生成的随机字符串（建议 16+ 字符），用于验证 Chatwoot 推送的 webhook 真伪。完整 Webhook URL 见下方"
+            "label": "Chatwoot Webhook HMAC Secret",
+            "description": "复制 Chatwoot 后台 Settings → Integrations → Webhooks → 你的 Webhook → Hmac Secret 字段的值。Chatwoot 会用它对每条 webhook 做 HMAC-SHA256 签名（含时间戳防重放），本插件验签后才接受请求。⚠️ 必须和 Chatwoot 那边完全一致。"
         },
         "enable_widget": {
             "type": "boolean",

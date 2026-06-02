@@ -52,8 +52,8 @@ composer dump-autoload   # 让 Laravel 发现 Plugin\ChatwootSync 命名空间
 | `chatwoot_account_id` | Chatwoot URL 中 `/accounts/N/` 的 N，一般是 `1` |
 | `chatwoot_api_token` | Chatwoot → Profile → Access Token |
 | `widget_token` | Chatwoot → Inboxes → 你的 Website Widget → Website Token |
-| `hmac_secret` | Chatwoot → Inboxes → 你的 Website Widget → Identity Validation 密钥 |
-| `webhook_secret` | **你自己生成的随机字符串**（16+ 字符） |
+| `hmac_secret` | Chatwoot → Inboxes → 你的 Website Widget → Identity Validation 密钥（用于 Widget 身份签名） |
+| `webhook_secret` | **不要自己生成** — 用 Chatwoot Webhook 后台生成的 HMAC Secret（见步骤 5） |
 | `enable_widget` | 是否开启浮窗注入，建议开 |
 | `enable_push_sync` | 是否开启 Xboard 主动推送，建议开 |
 | `enable_telegram_id_match` | 是否开启 TG ID 回退匹配，建议开 |
@@ -84,12 +84,17 @@ composer dump-autoload   # 让 Laravel 发现 Plugin\ChatwootSync 命名空间
 
 Chatwoot → Settings → Integrations → Webhooks → **Add new**
 
-- **End point URL**:
+- **End point URL**:（**不带任何 query 参数**）
   ```
-  https://your-xboard.com/api/v1/plugin/chatwoot/sync?token=YOUR_WEBHOOK_SECRET
+  https://your-xboard.com/api/v1/plugin/chatwoot/sync
   ```
-  把 `YOUR_WEBHOOK_SECRET` 换成插件配置里填的 `webhook_secret`
+- **Hmac Secret**：点 "Generate" Chatwoot 会生成一个 24 位左右的随机字符串（**示例值已隐藏 — 请使用 Chatwoot 实际生成的**）
+  - **复制这个值**，回到 Xboard 插件配置页粘贴到 `webhook_secret` 字段，保存
+  - Chatwoot 会用它对每条 webhook 做 HMAC-SHA256 签名，写入 `X-Chatwoot-Signature` Header，本插件验签后才接受请求
+  - ⚠️ 两边的密钥**必须完全一致**（含末尾空格）
 - **Subscribed events**: ✅ Contact Created, ✅ Contact Updated
+
+> **关于安全性**：本插件使用 Chatwoot 官方 HMAC 签名（Stripe-style），含时间戳防重放（5 分钟容忍窗口）、签整个 body 防篡改。不再使用 URL `?token=` 参数（那种方式在日志/proxy/referrer 中容易泄露）。
 
 ### 6. Xboard 主题注入 Widget
 
@@ -145,10 +150,17 @@ php artisan route:list | grep chatwoot
 curl https://your-xboard.com/api/v1/plugin/chatwoot/health
 # 期望返回 9 个布尔值，全 true 表示配置齐全
 
-# 3. 测试 webhook（注意带 token）
-curl -X POST "https://your-xboard.com/api/v1/plugin/chatwoot/sync?token=YOUR_WEBHOOK_SECRET" \
+# 3. 测试 webhook（需要计算 HMAC 签名）
+BODY='{"event":"contact_updated","id":1,"email":"test@example.com","account":{"id":1}}'
+TS=$(date +%s)
+SECRET="YOUR_WEBHOOK_HMAC_SECRET"   # 等于 Chatwoot 后台填的 Hmac Secret
+SIG="sha256=$(echo -n "${TS}.${BODY}" | openssl dgst -sha256 -hmac "$SECRET" -hex | sed 's/^.*= //')"
+
+curl -X POST "https://your-xboard.com/api/v1/plugin/chatwoot/sync" \
   -H "Content-Type: application/json" \
-  -d '{"event":"contact_updated","id":1,"email":"test@example.com","account":{"id":1}}'
+  -H "X-Chatwoot-Timestamp: $TS" \
+  -H "X-Chatwoot-Signature: $SIG" \
+  -d "$BODY"
 
 # 4. 测试 widget.js 渲染
 curl https://your-xboard.com/api/v1/plugin/chatwoot/widget.js
@@ -204,6 +216,9 @@ curl https://your-xboard.com/api/v1/plugin/chatwoot/widget.js
 | widget-identity 总是返回 `{authenticated: false}` | localStorage token key 名不一致 | 浏览器 DevTools → Application → Local Storage 看 key 名；若不是 `auth_data/token/access_token`，需在 widget.blade.php 加 |
 | webhook 报 `account_mismatch` | 别的 Chatwoot 账号误推到这个 URL | 检查 Chatwoot Webhook URL 配置；或确认 `chatwoot_account_id` 填对了 |
 | webhook 没触发 | URL 错或 secret 不匹配 | Chatwoot Webhook 详情页 "Test webhook" 试一下 |
+| webhook 返回 `missing_signature` | Chatwoot Webhook 后台没填 Hmac Secret | 在 Chatwoot Webhook 编辑页 Generate 一个，复制到插件 `webhook_secret` |
+| webhook 返回 `invalid_signature` | 两边 secret 不一致 | 重新复制 Chatwoot 那边的值，注意首尾空格 |
+| webhook 返回 `stale_timestamp` | Xboard 服务器时钟与 Chatwoot 偏差 > 5 分钟 | `timedatectl status` / 校时 (`sudo timedatectl set-ntp true`) |
 | webhook 触发但 contact 没更新 | Queue 没起 / API token 权限不足 | `ps aux \| grep queue:work`；Chatwoot 用 Administrator Bot |
 | 客服看不到字段 | 13 个 Custom Attribute 没创建 | 见安装步骤 4 |
 | 回填很慢 | rate 默认 200ms 慢 | 加 `--rate=100`（注意 Chatwoot 限流） |
@@ -212,12 +227,12 @@ curl https://your-xboard.com/api/v1/plugin/chatwoot/widget.js
 
 ## 安全考量
 
-1. **webhook_secret** 至少 16 字符，含字母数字，绝不进 git
+1. **webhook_secret** = Chatwoot 自动生成的 Hmac Secret，校验使用 Stripe-style 签名（含时间戳防重放 + HMAC-SHA256 防篡改）。`hash_equals()` 比较防 timing attack。绝不进 git。
 2. **chatwoot_api_token** 用专用 Bot 账号 token，便于撤销
-3. **hmac_secret** 仅放后端（插件配置 + Chatwoot 后端），绝对不进前端 JS
+3. **hmac_secret** （Widget Identity Validation 用）仅放后端（插件配置 + Chatwoot 后端），绝对不进前端 JS
 4. **widget.js** 已设 `Cache-Control: no-store`，CDN 不会缓存
-5. **SyncController** 用 `hash_equals()` 比较 token，防 timing attack
-6. **回填命令** 限速 200ms 默认值保护 Chatwoot 不被打爆
+5. **回填命令** 限速 200ms 默认值保护 Chatwoot 不被打爆
+6. **account_id 校验** 阻断别的 Chatwoot 账号误推的 webhook
 
 ---
 

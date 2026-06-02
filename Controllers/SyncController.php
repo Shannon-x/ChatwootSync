@@ -12,30 +12,36 @@ use Plugin\ChatwootSync\Jobs\PushToChatwootJob;
 
 class SyncController extends Controller
 {
+    /** Chatwoot webhook 时间戳允许偏差（秒）—— 防重放 */
+    private const SIGNATURE_TIMESTAMP_TOLERANCE = 300;
+
     /**
      * 接收 Chatwoot 推过来的 webhook
      *
      * Expected URL:
-     *   POST /api/v1/plugin/chatwoot/sync?token=<webhook_secret>
+     *   POST /api/v1/plugin/chatwoot/sync   (NO query params)
+     *
+     * Expected headers (Chatwoot 自动添加，只要 Webhook 后台填了 secret):
+     *   X-Chatwoot-Timestamp: <unix_ts>
+     *   X-Chatwoot-Signature: sha256=HMAC-SHA256(secret, "${ts}.${body}")
      *
      * Expected events: contact_created, contact_updated
+     *
+     * 安全模型：使用 Chatwoot 官方 HMAC 签名（Stripe-style），含时间戳防重放、
+     *           签整个 body 防篡改。不再使用 URL query token。
      */
     public function handle(Request $request): JsonResponse
     {
         $config = $this->config();
-        $expected = (string) ($config['webhook_secret'] ?? '');
+        $secret = (string) ($config['webhook_secret'] ?? '');
 
-        if ($expected === '') {
+        if ($secret === '') {
             return response()->json(['ok' => false, 'error' => 'webhook_secret_not_configured'], 503);
         }
 
-        $token = (string) $request->query('token', '');
-        if (!hash_equals($expected, $token)) {
-            Log::warning('[ChatwootSync] webhook unauthorized', [
-                'ip' => $request->ip(),
-                'event' => $request->input('event'),
-            ]);
-            return response()->json(['ok' => false, 'error' => 'forbidden'], 403);
+        $verifyResult = $this->verifySignature($request, $secret);
+        if ($verifyResult !== null) {
+            return $verifyResult;
         }
 
         $event = (string) $request->input('event', '');
@@ -141,5 +147,49 @@ class SyncController extends Controller
     private function config(): array
     {
         return app(PluginConfigService::class)->getDbConfig('chatwoot_sync');
+    }
+
+    /**
+     * 校验 Chatwoot webhook 的 HMAC 签名
+     *
+     * 返回 null 表示校验通过；返回 JsonResponse 表示校验失败、应直接返回该响应
+     */
+    private function verifySignature(Request $request, string $secret): ?JsonResponse
+    {
+        $signature = (string) $request->header('X-Chatwoot-Signature', '');
+        $timestamp = (string) $request->header('X-Chatwoot-Timestamp', '');
+
+        if ($signature === '' || $timestamp === '') {
+            Log::warning('[ChatwootSync] webhook missing signature headers', [
+                'ip' => $request->ip(),
+                'event' => $request->input('event'),
+                'hint' => 'Chatwoot Webhook 后台必须填写 HMAC Secret，否则不会发送签名 Header',
+            ]);
+            return response()->json(['ok' => false, 'error' => 'missing_signature'], 401);
+        }
+
+        // 时间戳新鲜度（防重放攻击）
+        $ts = (int) $timestamp;
+        if ($ts <= 0 || abs(time() - $ts) > self::SIGNATURE_TIMESTAMP_TOLERANCE) {
+            Log::warning('[ChatwootSync] webhook stale or invalid timestamp', [
+                'timestamp' => $timestamp,
+                'now' => time(),
+            ]);
+            return response()->json(['ok' => false, 'error' => 'stale_timestamp'], 401);
+        }
+
+        // 签名 = sha256=HMAC-SHA256(secret, "${ts}.${raw_body}")
+        $body = (string) $request->getContent();
+        $expected = 'sha256=' . hash_hmac('sha256', $timestamp . '.' . $body, $secret);
+
+        if (!hash_equals($expected, $signature)) {
+            Log::warning('[ChatwootSync] webhook signature mismatch', [
+                'ip' => $request->ip(),
+                'event' => $request->input('event'),
+            ]);
+            return response()->json(['ok' => false, 'error' => 'invalid_signature'], 403);
+        }
+
+        return null;
     }
 }
