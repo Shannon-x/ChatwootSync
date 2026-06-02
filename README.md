@@ -137,6 +137,42 @@ location /api/v1/plugin/chatwoot/ {
 
 > **三种都不需要改插件代码**——按你部署情况挑一个即可。
 
+#### 与 Chatwoot 官方嵌入脚本共存
+
+如果你已经在用户前端放了 Chatwoot 官方嵌入脚本（含 `window.chatwootSettings` + 加载 sdk.js + 调 `chatwootSDK.run`），**不用改它**，只需在它**之后**追加一行 widget.js：
+
+```html
+<!-- 你已有的官方嵌入脚本（保持不变）-->
+<script>
+  window.chatwootSettings = {position: "right", launcherTitle: "联系我们"};
+  (function(d,t){
+    var BASE_URL="https://your-chatwoot.com";
+    var g=d.createElement(t), s=d.getElementsByTagName(t)[0];
+    g.src=BASE_URL+"/packs/js/sdk.js"; g.async=true;
+    s.parentNode.insertBefore(g,s);
+    g.onload=function(){ window.chatwootSDK.run({websiteToken:"...", baseUrl:BASE_URL}); };
+  })(document,"script");
+</script>
+
+<!-- 追加这一行就够，widget.js 会自动检测 SDK 已被加载，仅接管身份注入 -->
+<script src="https://your-xboard.com/api/v1/plugin/chatwoot/widget.js" defer></script>
+```
+
+widget.js 内置 3 重 SDK 探测（`window.chatwootSDK` / `window.$chatwoot` / DOM 中已有 sdk.js 脚本）+ DOMContentLoaded 二次检测，避免重复加载。
+
+#### CSP 注意事项
+
+如果你的站点用了严格 CSP，需要允许：
+- `script-src` 包含 Xboard 域名（widget.js）+ Chatwoot 域名（sdk.js）
+- `connect-src` 包含 Xboard 域名（identity 端点 fetch）
+
+例：
+```
+Content-Security-Policy:
+  script-src 'self' https://your-xboard.com https://your-chatwoot.com;
+  connect-src 'self' https://your-xboard.com https://your-chatwoot.com;
+```
+
 ### 7. 存量回填（现有 contact）
 
 ```bash

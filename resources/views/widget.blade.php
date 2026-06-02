@@ -6,71 +6,59 @@
       $widget_token       string  Web Widget Website Token
       $identity_endpoint  string  /api/v1/plugin/chatwoot/widget-identity 绝对地址
       $has_hmac_secret    bool    后端是否已配置 hmac_secret
+
+    设计要点 — "智能共存"：
+      用户可能已经在 HTML 里放了 Chatwoot 官方嵌入脚本（含 chatwootSettings +
+      自行加载 sdk.js + chatwootSDK.run）。本脚本自动检测这种情况，仅接管
+      "身份注入"（fetch identity → setUser），不重复加载 SDK、不重复 run。
+
+    JSON_HEX_* flags 防 </script> 注入逃逸（深度防御，即便我们以 external
+    script 返回，admin 配置值仍可能被复用到其他位置）。
 --}}
 // ChatwootSync widget @ {{ date('c') }}
 (function (d, t) {
-  var BASE_URL = {!! json_encode($base_url, JSON_UNESCAPED_SLASHES) !!};
-  var TOKEN = {!! json_encode($widget_token) !!};
-  var IDENTITY_URL = {!! json_encode($identity_endpoint, JSON_UNESCAPED_SLASHES) !!};
+  var BASE_URL = {!! json_encode($base_url, JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) !!};
+  var TOKEN = {!! json_encode($widget_token, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) !!};
+  var IDENTITY_URL = {!! json_encode($identity_endpoint, JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) !!};
   var HAS_HMAC = {!! $has_hmac_secret ? 'true' : 'false' !!};
 
   if (window.__chatwootSyncLoaded) return;
   window.__chatwootSyncLoaded = true;
 
-  // ---------- 1. 加载 Chatwoot SDK ----------
-  var g = d.createElement(t), s = d.getElementsByTagName(t)[0];
-  g.src = BASE_URL + "/packs/js/sdk.js";
-  g.defer = true;
-  g.async = true;
-  s.parentNode.insertBefore(g, s);
-
-  g.onload = function () {
-    if (!window.chatwootSDK) return;
-    window.chatwootSDK.run({ websiteToken: TOKEN, baseUrl: BASE_URL });
-
-    if (!HAS_HMAC) {
-      if (window.console && console.warn) {
-        console.warn('[ChatwootSync] hmac_secret not configured on Xboard — widget running anonymously');
-      }
-      return;
+  // ---------- 检测：SDK 是否已被其他脚本处理 ----------
+  function sdkHandledElsewhere() {
+    if (window.chatwootSDK || window.$chatwoot || window.__chatwootSDKRunInProgress) return true;
+    var scripts = d.getElementsByTagName('script');
+    for (var i = 0; i < scripts.length; i++) {
+      var src = scripts[i].src || '';
+      if (src.indexOf('/packs/js/sdk.js') !== -1) return true;
     }
-
-    // ---------- 2. SDK 就绪后，从 localStorage 取 token 并 fetch 身份 ----------
-    window.addEventListener('chatwoot:ready', function () { applyIdentity(); });
-  };
-
-  function applyIdentity() {
-    var token = readToken();
-    if (!token) return; // 未登录，匿名访客
-
-    fetch(IDENTITY_URL, {
-      method: 'GET',
-      headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/json' },
-      credentials: 'omit'
-    })
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (data) {
-        if (!data || !data.authenticated) return;
-        try {
-          window.$chatwoot.setUser(data.identifier, {
-            email: data.email,
-            name: data.name,
-            identifier_hash: data.identifier_hash
-          });
-        } catch (err) {
-          if (window.console && console.warn) console.warn('[ChatwootSync] setUser failed', err);
-        }
-      })
-      .catch(function (err) {
-        if (window.console && console.warn) console.warn('[ChatwootSync] identity fetch failed', err);
-      });
+    return false;
   }
 
-  /**
-   * Xboard 前端的常见 token 存储位置（按优先级尝试）
-   * - localStorage['auth_data']: 形如 "Bearer xxx" 或裸 token
-   * - localStorage['token']: 历史 key
-   */
+  // ---------- "SDK 就绪后回调"（多路径接住事件 + 永久指数退避轮询）----------
+  function whenChatwootReady(cb) {
+    var called = false;
+    function safe() { if (called) return; called = true; cb(); }
+
+    // 路径 A：事件——同时监听 window 和 document（不确定 SDK dispatch 到哪个）
+    window.addEventListener('chatwoot:ready', safe);
+    d.addEventListener('chatwoot:ready', safe);
+
+    // 路径 B：轮询兜底——250ms 起步、指数退避到 5s 封顶、不设上限（应对慢网络）
+    var delay = 250;
+    function tick() {
+      if (called) return;
+      if (window.$chatwoot && typeof window.$chatwoot.setUser === 'function') {
+        safe();
+        return;
+      }
+      delay = Math.min(delay * 1.5, 5000);
+      setTimeout(tick, delay);
+    }
+    setTimeout(tick, delay);
+  }
+
   function readToken() {
     try {
       var keys = ['auth_data', 'token', 'access_token'];
@@ -84,10 +72,112 @@
     return null;
   }
 
-  // SPA 登录/登出时 auth_data 写入或清除 → 重新 apply identity
+  // 并发守卫 + 代际计数：防止快速 token 变化导致旧响应覆盖新响应
+  var inFlight = false;
+  var generation = 0;
+
+  function applyIdentity() {
+    var token = readToken();
+    if (!token) return;
+    if (inFlight) return;
+
+    inFlight = true;
+    var myGen = ++generation;
+
+    fetch(IDENTITY_URL, {
+      method: 'GET',
+      headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/json' },
+      credentials: 'omit'
+    })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (myGen !== generation) return;          // 已有更新的请求，丢弃本次结果
+        if (!data || !data.authenticated) return;
+        if (!window.$chatwoot || typeof window.$chatwoot.setUser !== 'function') return;
+        try {
+          window.$chatwoot.setUser(data.identifier, {
+            email: data.email,
+            name: data.name,
+            identifier_hash: data.identifier_hash
+          });
+        } catch (err) {
+          if (window.console && console.warn) console.warn('[ChatwootSync] setUser failed', err);
+        }
+      })
+      .catch(function (err) {
+        if (window.console && console.warn) console.warn('[ChatwootSync] identity fetch failed', err);
+      })
+      .then(function () { inFlight = false; });
+  }
+
+  function bootIdentity() {
+    if (!HAS_HMAC) {
+      if (window.console && console.warn) {
+        console.warn('[ChatwootSync] hmac_secret not configured on Xboard — widget running anonymously');
+      }
+      return;
+    }
+    whenChatwootReady(applyIdentity);
+  }
+
+  // ---------- 主流程 ----------
+  // 1. 立刻检测；如果已被处理，直接进入身份注入
+  if (sdkHandledElsewhere()) {
+    bootIdentity();
+  } else {
+    // 2. 未检测到——等 DOMContentLoaded 后再检测一次。
+    //    这能让"用户脚本和 widget.js 顺序未知"的场景兜底：DOM 解析完毕时
+    //    所有 inline script 都已执行过，sdkHandledElsewhere() 此时再为
+    //    false 才真的需要我们自己加载 SDK。
+    var startSelfLoad = function () {
+      if (sdkHandledElsewhere()) { bootIdentity(); return; }
+
+      var g = d.createElement(t), s = d.getElementsByTagName(t)[0];
+      g.src = BASE_URL + '/packs/js/sdk.js';
+      g.async = true;  // 动态 script 默认 async，写明仅为可读性
+      s.parentNode.insertBefore(g, s);
+      g.onload = function () {
+        if (!window.chatwootSDK) return;
+        // 双重防御：onload 触发时若另一脚本恰好已开始 run，不重复 run
+        if (window.$chatwoot || window.__chatwootSDKRunInProgress) {
+          bootIdentity();
+          return;
+        }
+        window.__chatwootSDKRunInProgress = true;
+        try {
+          window.chatwootSDK.run({ websiteToken: TOKEN, baseUrl: BASE_URL });
+        } catch (err) {
+          if (window.console && console.warn) console.warn('[ChatwootSync] chatwootSDK.run failed', err);
+        }
+        bootIdentity();
+      };
+    };
+
+    if (d.readyState === 'loading') {
+      d.addEventListener('DOMContentLoaded', startSelfLoad);
+    } else {
+      startSelfLoad();
+    }
+  }
+
+  // ---------- 监听登录态变化 ----------
+  // 跨标签：storage 事件（HTML 规范：仅在其他标签触发，不在当前标签）
   window.addEventListener('storage', function (e) {
     if (e.key === 'auth_data' || e.key === 'token' || e.key === 'access_token') {
       try { applyIdentity(); } catch (err) {}
     }
   });
+
+  // 同标签：SPA 登录后 localStorage 变化 storage 事件不触发——用轮询兜底
+  var lastToken = readToken();
+  setInterval(function () {
+    var current = readToken();
+    if (current && current !== lastToken) {
+      lastToken = current;
+      try { applyIdentity(); } catch (err) {}
+    } else if (!current && lastToken) {
+      // 登出：清空 lastToken，下次登录能重新触发
+      lastToken = null;
+    }
+  }, 2000);
 })(document, "script");
