@@ -2,3 +2,6 @@
 .vscode/
 *.log
 .DS_Store
+
+# 工单知识库产物：含脱敏后的真实工单正文，不进版本库
+storage/

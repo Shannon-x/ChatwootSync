@@ -1,7 +1,7 @@
 {
     "name": "Chatwoot 用户信息同步",
     "code": "chatwoot_sync",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "Xboard ↔ Chatwoot 双向同步插件：让 Chatwoot 客服侧栏自动展示客户的 Xboard 套餐/余额/流量等数据；同时把 Chatwoot Web Widget 嵌入 Xboard 用户控制台（自动 Identity Validation，无需用户填邮箱）",
     "author": "Shannon",
     "require": {
@@ -68,6 +68,42 @@
             "default": "5",
             "label": "登录事件节流（分钟）",
             "description": "同一用户在 N 分钟内的多次登录只同步 1 次，避免高频刷新"
+        },
+        "kb_assistant_id": {
+            "type": "string",
+            "default": "1",
+            "label": "工单知识库 · Captain 助手 ID",
+            "description": "工单知识文档投递到哪个 Captain 助手。Chatwoot → Captain → 助手页 URL 里的数字"
+        },
+        "kb_months": {
+            "type": "string",
+            "default": "3",
+            "label": "工单知识库 · 时间窗（月）",
+            "description": "只编译最近 N 个月的已关闭工单。窗口越大越容易把过期口径（旧价格、已下线节点）学进机器人"
+        },
+        "kb_max_chars": {
+            "type": "string",
+            "default": "6000",
+            "label": "工单知识库 · 单文档最大字符数",
+            "description": "Captain 对每个文档做一次 LLM 调用生成 FAQ。文档太大会超上下文、生成质量崩掉；实测 5-6 千字最稳"
+        },
+        "kb_exclude_keywords": {
+            "type": "string",
+            "default": "补偿,特殊处理,单独给你,已为你,给你延,手动给,内部,测试账号,恶意,投诉,立刻结束,已对你,通知我,封号,拉黑,已经给你,已给你,已帮你,已经帮你,已完成提现,补发,已经给您,已给您,已帮您,已经帮您,已经为您,已经为你,为您补单,为你补单,给你补上,为您提现,为你提现",
+            "label": "工单知识库 · 排除关键词",
+            "description": "命中任一关键词的工单整单不进知识库。用于挡掉三类东西：给某个客户的一次性特例（会变成对所有人的承诺）、针对个别客户的惩罚性处置、对内部同事说的话。留空则用代码里的默认列表"
+        },
+        "kb_mask_domains": {
+            "type": "string",
+            "default": "",
+            "label": "工单知识库 · 轮换域名后缀",
+            "description": "填你自己的入口域名后缀（多个用逗号分隔），这些后缀下的子域会被抹成「订阅域名」。入口域名被墙就换一个，写死进 FAQ 等于埋定时炸弹（实测生成过「把 alpha1234.example.net 改成 beta5678.example.net」这种答案）。另外形如 abc1234.xxx.yy 的自动生成子域会被启发式规则自动抹掉，不填也能兜住一部分"
+        },
+        "kb_keep_domains": {
+            "type": "string",
+            "default": "",
+            "label": "工单知识库 · 保留域名白名单",
+            "description": "填你自己的官网/帮助中心域名（多个用逗号分隔）。客服回答里指向这些站点的链接会原样保留（对 FAQ 有用），其余一切 URL 一律替换成 [链接]。github.com、apps.apple.com 等通用下载站已内置，无需重复填"
         }
     }
 }

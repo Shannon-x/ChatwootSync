@@ -331,8 +331,120 @@ composer dump-autoload
 
 ---
 
+## 工单知识库 → Captain 自动生成 FAQ
+
+把 Xboard 工单喂给 Chatwoot Captain，由 **Captain 自己的 FAQ 生成器**产出常见问题。我们只负责挑料和脱敏，不自己调 LLM。
+
+### 原理
+
+```
+v2_ticket / v2_ticket_message
+   → TicketKnowledgeBuilder（筛选 → 脱敏 → 分类 → 按 6000 字切块）
+   → kb.json
+   → scripts/publish-kb.sh（宿主机）
+   → Captain::Document（status=available + content 直接写入）
+   → [Chatwoot 原生] ResponseBuilderJob → FaqGeneratorService
+   → captain_assistant_responses（正式 FAQ，带 embedding，机器人立即可检索）
+```
+
+**为什么投递要在宿主机跑，而不是插件直接调 API**：Captain 的 `POST /captain/documents`
+只接受 `name` / `external_link` / `pdf_file`，**不接受 `content`**——内容必须由 Firecrawl
+（云端爬虫，要求页面公网可达）抓取，或由 PDF 解析填充。直接写 `content` 可以完全绕开
+「把工单挂到公网让第三方抓」这件事。代价是需要 `docker exec` 进 Chatwoot 容器，所以投递
+脚本放在宿主机执行。
+
+创建文档时就给 `status: available`，会跳过 `enqueue_crawl_job`（它只在 `in_progress` 时排队），
+所以既不调 Firecrawl，也不会去抓那个假的 `xboard-ticket-kb://` 链接。
+
+### 用法
+
+```bash
+# 1) 只看统计和样本，不写任何文件（先确认脱敏结果和分类是否合理）
+docker exec index-web-1 php artisan chatwoot:ticket-kb --dry-run --samples=10
+
+# 2) 全流程演练，不写 Chatwoot
+plugins/ChatwootSync/scripts/publish-kb.sh --dry-run
+
+# 3) 先投一两个分类看质量（强烈建议第一次这么做）
+plugins/ChatwootSync/scripts/publish-kb.sh --only=refund,invite
+
+# 4) 全量投递；内容没变的文档会跳过，不会重复烧 LLM
+plugins/ChatwootSync/scripts/publish-kb.sh
+
+# 5) 投递后几分钟：检查有没有文档静默生成 0 条（见风险 4），有就重排
+docker exec chatwoot-web bundle exec rails runner /tmp/publish_kb.rb /tmp/xboard-kb.json --status
+docker exec chatwoot-web bundle exec rails runner /tmp/publish_kb.rb /tmp/xboard-kb.json --retry-empty
+
+# 6) 体检生成结果（生成侧问题，源头拦不住，只能产出后查）——每次投递后都该跑
+docker exec chatwoot-web bundle exec rails runner /tmp/publish_kb.rb /tmp/xboard-kb.json --lint
+
+# 7) 通读复核已生成的 FAQ（Captain 后台一条条点太慢）
+docker cp plugins/ChatwootSync/scripts/publish_kb.rb chatwoot-web:/tmp/publish_kb.rb
+docker exec chatwoot-web bundle exec rails runner /tmp/publish_kb.rb /tmp/xboard-kb.json --review
+
+# 8) 删掉 JSON 里已不存在的旧知识文档（连同其 FAQ）
+plugins/ChatwootSync/scripts/publish-kb.sh --prune
+```
+
+分类 slug：`traffic` `expiry-renew` `payment` `refund` `invite` `subscribe` `client` `node` `plan-change` `account` `other`
+
+### 增量更新
+
+工单是持续产生的，但 **Xboard 没有「工单关闭」钩子**（只有 create / reply.user / reply.admin），
+所以增量靠定时重编译，而不是事件触发。宿主机 crontab：
+
+```cron
+0 4 * * 1 /opt/1panel/www/sites/xboard/index/plugins/ChatwootSync/scripts/weekly-kb.sh >> /var/log/xboard-kb.log 2>&1
+```
+
+`weekly-kb.sh` 是完整一轮：投递 → 等 5 分钟让 Sidekiq 生成 → `--retry-empty` 补空文档 →
+`--lint` 体检，全程带时间戳写进 `/var/log/xboard-kb.log`（已配 logrotate 月轮转保留 6 份）。
+**2026-08-15 已挂上**，每周一 04:00 跑。撤掉：`crontab -e` 删掉那一行。
+
+只有 content 真的变化的文档才会重新生成 FAQ（Captain 用 `saved_change_to_content?` 判断），
+没变的文档零成本跳过。重新生成时会删掉该文档下**未被人工编辑过**的旧 FAQ，人工改过的
+（`edited=true`）保留——所以你在 Captain 后台手工润色过的答案不会被下一次同步冲掉。
+
+### ⚠️ 必读风险
+
+1. **一次性特例会被学成通用规则**。实测生成过「因为你 XXX，现在终止你的套餐」这种针对个别客户的处置，被挂到了「连接超时怎么办」下面。默认排除词已经堵了一批
+   （见 `TicketKnowledgeBuilder::DEFAULT_EXCLUDE`，后台可改），但**关键词永远堵不全，
+   首次投递后必须用 `--review` 通读一遍**。
+2. **对内说的话会泄漏**。「若后续再有人反馈请通知我」这类同事之间的交代，也会进对客答案。
+3. **时效性内容会变成错答**。实测生成过「把订阅链接里的 `alpha1234.example.net` 改成
+   `beta5678.example.net`」这种带具体轮换域名的答案——域名一换，这条 FAQ 就开始骗人。
+   轮换入口域名现在会被 `TicketSanitizer` 自动抹成 `[订阅域名]` 占位符（后缀名单在后台 `kb_mask_domains` 里填，另外形如 `abc1234.x.yy` 的自动生成子域也会兜住），并且「把 A 改成 B」
+   这类整句会被换成「请以官网最新的订阅链接为准」——**只抹域名不收句会生成出
+   「把订阅域名改成订阅域名」→ 模型压缩成「用『订阅域名修订阅域名即可』」这种鬼话，实测踩过**。
+   但旧价格、已下线节点、过期活动这些仍然只能靠时间窗（默认 3 个月）+ 人工复核挡。
+4. **生成侧问题源头拦不住，只能产出后体检**。`--lint` 查四类：域名被模型打散（例如 `e x a m p l e . c o m`，客户照抄打不开）、绝对时间戳被写成通用答案、个案动作播报
+   （"订单已给你取消"）、脱敏占位符被原样抄进答案（"到期时间为『[具体时间]』"）。
+   最后一类要靠文档前言明确告诉模型「不要引用方括号占位符」才压得下去——
+   实测加这句前泄漏 15 条，加完剩 3 条。
+
+5. **生成失败是静默的**。`FaqGeneratorService` 遇到 LLM 报错时 `rescue` → 记日志 → 返回空数组，
+   不重试也不标失败，表现为「这个文档 0 条 FAQ」，后台看不出来。首批 27 个文档就翻车 1 个。
+   **投递后几分钟务必跑一次 `--status`**，有空文档用 `--retry-empty` 重排即可（纯瞬时错误，重跑就好）。
+6. **配额（已核实，不是想当然）**：`captain_responses_usage` 只在**会话回复 / Copilot / 语音转录**
+   时累加，**文档生成 FAQ 不消耗它**——实测一次生成 728 条，计数器只从 29878 动到 29881。
+   所以重生成不会把机器人配额烧穿；重生成的真实代价只是 LLM 调用（每文档一次），
+   定时任务按周跑即可，没必要更频繁。
+7. **语气**。工单里客服的原话可能比较硬（"自己去测一下不就知道了"这类），生成的 FAQ 会保留这个调子。
+   助手的人格提示词会在回复时软化，但知识本身建议人工润色。
+
+### 回滚
+
+```bash
+# 删掉全部工单知识文档及其生成的 FAQ（不影响其它来源的知识）
+docker exec chatwoot-web bundle exec rails runner \
+  'Captain::Assistant.find(1).documents.where("external_link LIKE ?", "xboard-ticket-kb://%").destroy_all'
+```
+
+---
+
 ## 版本
 
+- v1.1.0（2026-08-15）：新增工单知识库 → Captain 自动 FAQ（`chatwoot:ticket-kb` + `scripts/publish-kb.sh`）
 - v1.0.0（2026-05-20）：初版
 
 ---
