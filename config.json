@@ -69,6 +69,30 @@
             "label": "登录事件节流（分钟）",
             "description": "同一用户在 N 分钟内的多次登录只同步 1 次，避免高频刷新"
         },
+        "enable_support_tools": {
+            "type": "boolean",
+            "default": false,
+            "label": "网站 Captain 只读查询",
+            "description": "允许指定网站收件箱的助手查询套餐和已验证客户的业务资料。"
+        },
+        "support_bearer_token": {
+            "type": "string",
+            "default": "",
+            "label": "客服查询专用密钥",
+            "description": "与 Captain HTTP 工具的 Bearer 凭据一致。使用独立随机密钥，仅配置在两端服务。"
+        },
+        "support_assistant_id": {
+            "type": "string",
+            "default": "",
+            "label": "客服查询助手 ID",
+            "description": "Chatwoot 中接入网站收件箱的 Captain 助手 ID。"
+        },
+        "support_website_inbox_id": {
+            "type": "string",
+            "default": "",
+            "label": "客服查询网站收件箱 ID",
+            "description": "仅此 Website 收件箱的真实会话可访问。"
+        },
         "kb_assistant_id": {
             "type": "string",
             "default": "1",

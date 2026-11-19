@@ -20,8 +20,12 @@ Route::get('/api/v1/plugin/chatwoot/widget.js', [WidgetController::class, 'widge
 
 // widget.js 客户端 fetch 取当前登录用户身份（要求 Authorization: Bearer ...）
 // 跨域场景浏览器会先发 OPTIONS preflight，identityPreflight 处理 CORS 协商
-Route::get('/api/v1/plugin/chatwoot/widget-identity', [WidgetController::class, 'identity']);
+Route::match(['GET', 'DELETE'], '/api/v1/plugin/chatwoot/widget-identity', [WidgetController::class, 'identity']);
 Route::options('/api/v1/plugin/chatwoot/widget-identity', [WidgetController::class, 'identityPreflight']);
 
 // 健康检查（不暴露敏感值，仅返回配置完整度）
 Route::get('/api/v1/plugin/chatwoot/health', [SyncController::class, 'health']);
+
+// 仅用于网站聊天，资源名称是固定白名单。
+Route::get('/api/v1/plugin/chatwoot/support/{topic}', [\Plugin\ChatwootSync\Controllers\WebsiteSupportController::class, 'show'])
+    ->whereIn('topic', ['plans', 'orders', 'connection', 'offers', 'quote']);

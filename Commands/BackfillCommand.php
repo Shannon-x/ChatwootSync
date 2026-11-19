@@ -87,7 +87,7 @@ class BackfillCommand extends Command
                 }
 
                 $user = $email !== ''
-                    ? User::with(['plan', 'invite_user'])->byEmail($email)->first()
+                    ? User::with('plan')->byEmail($email)->first()
                     : null;
 
                 if ($user) {

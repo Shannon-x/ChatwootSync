@@ -102,6 +102,23 @@ class ChatwootClient
         ];
     }
 
+    public function getConversation(int $displayId): ?array
+    {
+        try {
+            $response = $this->request()->withoutRedirecting()->connectTimeout(2)->timeout(5)->retry(1, throw: false)
+                ->get("{$this->baseUrl}/api/v1/accounts/{$this->accountId}/conversations/{$displayId}");
+        } catch (\Illuminate\Http\Client\ConnectionException) {
+            abort(503, 'Website conversation verification is temporarily unavailable.');
+        }
+
+        if ($response->status() === 404) {
+            return null;
+        }
+        abort_unless($response->successful() && is_array($response->json()), 503, 'Website conversation verification is unavailable.');
+
+        return $response->json();
+    }
+
     private function request(): PendingRequest
     {
         return Http::withHeaders([

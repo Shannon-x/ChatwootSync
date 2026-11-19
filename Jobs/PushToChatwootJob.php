@@ -59,7 +59,7 @@ class PushToChatwootJob implements ShouldQueue
         // ----- 1. 拿到 Xboard User（可能为空，表示 no_account 状态）-----
         $user = null;
         if ($this->userId) {
-            $user = User::with(['plan', 'invite_user'])->find($this->userId);
+            $user = User::with('plan')->find($this->userId);
         }
 
         // ----- 2. 解析 contact_id（若 webhook 没提供，则按 email 反查）-----

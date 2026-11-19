@@ -3,12 +3,11 @@
 namespace Plugin\ChatwootSync\Controllers;
 
 use App\Http\Controllers\Controller;
-use App\Models\User;
 use App\Services\Plugin\PluginConfigService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
-use Illuminate\Support\Facades\Auth;
+use Plugin\ChatwootSync\Services\WebsitePanelSession;
 use Illuminate\Support\Facades\Log;
 
 class WidgetController extends Controller
@@ -88,10 +87,23 @@ class WidgetController extends Controller
             return response()->json(['error' => 'hmac_secret_not_configured'], 503);
         }
 
-        $user = $this->resolveCurrentUser($request);
+        $sessions = app(WebsitePanelSession::class);
+        $user = $sessions->panelUser($request);
         if (!$user || empty($user->email)) {
             return $this->withCors($request, response()->json(['authenticated' => false])
                 ->header('Cache-Control', 'no-store'));
+        }
+
+        $source = (string) $request->header('X-Chatwoot-Widget-Source');
+        $inboxId = (int) ($config['support_website_inbox_id'] ?? 0);
+        if ($request->isMethod('DELETE')) {
+            if ($inboxId > 0 && WebsitePanelSession::validSource($source)) {
+                $sessions->revoke($user, $source, $user->email, $inboxId);
+            }
+            return $this->withCors($request, response()->json(['detached' => true])->header('Cache-Control', 'no-store'));
+        }
+        if ($inboxId > 0 && WebsitePanelSession::validSource($source)) {
+            $sessions->bind($user, $source, $user->email, $inboxId);
         }
 
         return $this->withCors($request, response()->json([
@@ -126,37 +138,10 @@ class WidgetController extends Controller
         $origin = (string) $request->header('Origin', '*');
         return $response
             ->header('Access-Control-Allow-Origin', $origin === '' ? '*' : $origin)
-            ->header('Access-Control-Allow-Methods', 'GET, OPTIONS')
-            ->header('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept')
+            ->header('Access-Control-Allow-Methods', 'GET, DELETE, OPTIONS')
+            ->header('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept, X-Chatwoot-Widget-Source')
             ->header('Access-Control-Max-Age', '86400')
             ->header('Vary', 'Origin');
-    }
-
-    private function resolveCurrentUser(Request $request): ?User
-    {
-        try {
-            $user = Auth::guard('sanctum')->user();
-            if ($user instanceof User) {
-                return $user;
-            }
-        } catch (\Throwable $e) {
-            // ignore, fallthrough
-        }
-
-        // 兜底：从 Authorization header 手动解析（保险）
-        try {
-            $bearer = $request->bearerToken();
-            if ($bearer && class_exists(\Laravel\Sanctum\PersonalAccessToken::class)) {
-                $pat = \Laravel\Sanctum\PersonalAccessToken::findToken($bearer);
-                if ($pat && $pat->tokenable instanceof User) {
-                    return $pat->tokenable;
-                }
-            }
-        } catch (\Throwable $e) {
-            // ignore
-        }
-
-        return null;
     }
 
     private function jsResponse(string $body, int $status = 200): Response

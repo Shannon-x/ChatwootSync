@@ -30,6 +30,8 @@ prune = ARGV.include?('--prune')
 only_arg = ARGV.find { |a| a.start_with?('--only=') }
 only = only_arg ? only_arg.split('=', 2).last.split(',').map(&:strip).reject(&:empty?) : nil
 
+abort '--prune requires a complete compilation; remove --only' if prune && only
+
 payload = JSON.parse(File.read(path))
 assistant = Captain::Assistant.find(payload.fetch('assistant_id'))
 
@@ -163,19 +165,34 @@ docs.each do |doc|
 end
 
 if prune
+  abort 'Cannot prune with an empty compilation' if docs.empty?
+
   keep = docs.map { |d| d['external_link'] }
   orphans = assistant.documents
                      .where("external_link LIKE 'xboard-ticket-kb://%'")
                      .where.not(external_link: keep)
-  orphans.each do |o|
-    stats[:pruned] += 1
-    puts format('  - %-52s (removed, %d FAQ 一并删除)', o.name, o.responses.count)
-    o.destroy unless dry_run
+  orphans.find_each do |doc|
+    review = lambda do |responses|
+      edited_flags = responses.pluck(:edited)
+      if edited_flags.any?
+        stats[:retained_edited] += 1
+        puts "  keep doc ##{doc.id}: #{edited_flags.count(true)} edited FAQ require review"
+        next
+      end
+      puts "  orphan doc ##{doc.id}: #{edited_flags.size} generated FAQ"
+      stats[:pruned] += 1
+      doc.destroy! unless dry_run
+    end
+    if dry_run
+      review.call(doc.responses)
+    else
+      doc.with_lock { review.call(doc.responses.lock) }
+    end
   end
 end
 
 puts
-puts "created=#{stats[:created]} updated=#{stats[:updated]} unchanged=#{stats[:unchanged]} pruned=#{stats[:pruned]}"
+puts "created=#{stats[:created]} updated=#{stats[:updated]} unchanged=#{stats[:unchanged]} pruned=#{stats[:pruned]} retained_edited=#{stats[:retained_edited]}"
 
 unless dry_run
   total = assistant.documents.where("external_link LIKE 'xboard-ticket-kb://%'").count
