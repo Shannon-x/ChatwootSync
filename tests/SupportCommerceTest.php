@@ -86,7 +86,7 @@ class SupportCommerceTest extends TestCase
         ]);
         $recharge = [
             'user_id' => $this->user->id, 'trade_no' => 'RECHARGE222222', 'deposit_amount' => 2000,
-            'pay_amount' => 2200, 'total_credit' => 2000, 'status' => RechargeOrder::STATUS_PENDING,
+            'pay_amount' => 2200, 'handling_amount' => 200, 'bonus_amount' => 300, 'total_credit' => 2300, 'status' => RechargeOrder::STATUS_PENDING,
             'created_at' => $minute + 35, 'updated_at' => $minute + 35,
         ];
         RechargeOrder::create($recharge);
@@ -97,6 +97,10 @@ class SupportCommerceTest extends TestCase
         self::assertSame(['222222', '111111'], array_column($rows, 'order_reference'));
         self::assertSame('余额充值', $rows[0]['kind']);
         self::assertSame('22.00', $rows[0]['cash_amount_yuan']);
+        self::assertSame(['20.00', '3.00', '2.00', '23.00'], [
+            $rows[0]['deposit_yuan'], $rows[0]['bonus_credit_yuan'], $rows[0]['handling_fee_yuan'], $rows[0]['credit_yuan'],
+        ]);
+        self::assertArrayNotHasKey('payg_delivery', $rows[1]);
         self::assertSame('待付款', $rows[1]['status']);
         self::assertSame('12.00', $rows[1]['cash_amount_yuan']);
         foreach ($rows as $row) {

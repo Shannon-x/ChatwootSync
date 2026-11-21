@@ -3,6 +3,7 @@
 namespace Plugin\ChatwootSync\Services;
 
 use App\Models\Order;
+use App\Models\PaygLog;
 use App\Models\Plan;
 use App\Models\RechargeOrder;
 use App\Models\User;
@@ -58,19 +59,28 @@ class SupportCommerce
             $recharges->where('trade_no', $tradeNo);
         }
         $orders = $orders->latest('created_at')->orderByDesc('id')->limit(8)
-            ->get(['trade_no', 'plan_id', 'type', 'period', 'total_amount', 'balance_amount', 'status', 'created_at']);
+            ->get(['id', 'trade_no', 'plan_id', 'type', 'period', 'total_amount', 'balance_amount', 'status', 'created_at']);
+        $deliveredOrders = $orders->whereIn('status', [Order::STATUS_COMPLETED, Order::STATUS_DISCOUNTED])->pluck('id');
+        $deliveries = PaygLog::where('user_id', $user->id)->whereIn('order_id', $deliveredOrders)
+            ->whereIn('type', [PaygLog::TYPE_RECHARGE, PaygLog::TYPE_AUTO_TOPUP])
+            ->get(['order_id', 'bytes', 'bonus_bytes', 'first_bonus_bytes'])->keyBy('order_id');
         $names = Plan::whereIn('id', $orders->pluck('plan_id')->unique())->pluck('name', 'id');
         $rows = $orders->map(fn (Order $order) => [
             'order_reference' => strlen((string) $order->trade_no) > 6 ? substr($order->trade_no, -6) : null, 'kind' => P::orderType((int) $order->type),
             'plan' => $names[$order->plan_id] ?? null, 'period' => P::periodName((string) $order->period),
             'cash_amount_yuan' => P::yuan($order->total_amount), 'balance_used_yuan' => P::yuan($order->balance_amount),
             'status' => P::orderStatus((int) $order->status), 'created_at' => (int) $order->created_at,
-        ]);
+        ] + ($deliveries->has($order->id) ? ['payg_delivery' => [
+            'purchased_gb' => P::gb($deliveries[$order->id]->bytes),
+            'tier_bonus_gb' => P::gb($deliveries[$order->id]->bonus_bytes),
+            'first_bonus_gb' => P::gb($deliveries[$order->id]->first_bonus_bytes),
+        ]] : []));
         $credits = $recharges->latest('created_at')->orderByDesc('id')->limit(8)
-            ->get(['trade_no', 'status', 'pay_amount', 'total_credit', 'created_at'])
+            ->get(['trade_no', 'status', 'pay_amount', 'deposit_amount', 'bonus_amount', 'handling_amount', 'total_credit', 'created_at'])
             ->map(fn (RechargeOrder $order) => [
                 'order_reference' => strlen((string) $order->trade_no) > 6 ? substr($order->trade_no, -6) : null, 'kind' => '余额充值', 'cash_amount_yuan' => P::yuan($order->pay_amount),
-                'credit_yuan' => P::yuan($order->total_credit), 'created_at' => (int) $order->created_at,
+                'deposit_yuan' => P::yuan($order->deposit_amount), 'bonus_credit_yuan' => P::yuan($order->bonus_amount),
+                'handling_fee_yuan' => P::yuan($order->handling_amount), 'credit_yuan' => P::yuan($order->total_credit), 'created_at' => (int) $order->created_at,
                 'status' => RechargeOrder::$statusMap[(int) $order->status] ?? '未知状态',
             ]);
         $recent = $rows->concat($credits)->sortByDesc('created_at')->take(8)->values()->map(function (array $row) {

@@ -27,7 +27,7 @@ class SupportIdentity
         $baseUrl = (string) ($config['chatwoot_base_url'] ?? '');
         $apiToken = (string) ($config['chatwoot_api_token'] ?? '');
         abort_unless($baseUrl !== '' && $apiToken !== '', 503);
-        $conversation = (new ChatwootClient($baseUrl, $accountId, $apiToken))->getConversation((int) $displayId);
+        $conversation = (new ChatwootClient($baseUrl, $accountId, $apiToken))->getConversation((int) $displayId, $requireCustomer);
         abort_unless($conversation && (string) ($conversation['id'] ?? '') === $displayId
             && (string) ($conversation['account_id'] ?? '') === $accountId
             && (string) ($conversation['inbox_id'] ?? '') === $inboxId
@@ -39,17 +39,13 @@ class SupportIdentity
         }
 
         $messageId = (string) $request->header('X-Chatwoot-Responding-To-Message-Id');
-        $message = $conversation['messages'][0] ?? [];
-        if ((string) ($message['id'] ?? '') !== $messageId) {
-            $message = $conversation['last_non_activity_message'] ?? [];
-        }
-        abort_unless(ctype_digit($messageId) && (string) ($message['id'] ?? '') === $messageId
-            && (string) ($message['conversation_id'] ?? '') === $displayId
-            && ($message['message_type'] ?? null) === 0 && ($message['sender_type'] ?? '') === 'Contact'
-            && (string) ($message['sender_id'] ?? '') === $contactId, 403, 'Open support from your signed-in panel.');
+        $proof = $conversation['latest_widget_message_proof'] ?? [];
+        abort_unless(ctype_digit($messageId) && (string) ($proof['id'] ?? '') === $messageId
+            && (string) ($proof['conversation_id'] ?? '') === $displayId
+            && (string) ($proof['contact_id'] ?? '') === $contactId, 403, 'Open support from your signed-in panel.');
 
         $identifier = (string) ($conversation['meta']['sender']['identifier'] ?? '');
-        $digest = (string) ($message['additional_attributes']['widget_sender_source_digest'] ?? '');
+        $digest = (string) ($proof['source_digest'] ?? '');
         $user = app(WebsitePanelSession::class)->resolve($digest, $identifier, (int) $inboxId);
         abort_unless($user, 403, 'Open support from your signed-in panel.');
         return $user;

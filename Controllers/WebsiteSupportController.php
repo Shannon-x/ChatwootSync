@@ -3,12 +3,14 @@
 namespace Plugin\ChatwootSync\Controllers;
 
 use App\Http\Controllers\Controller;
+use App\Models\User;
 use App\Services\Plugin\PluginConfigService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Plugin\ChatwootSync\Services\SupportCommerce;
 use Plugin\ChatwootSync\Services\SupportConnection;
 use Plugin\ChatwootSync\Services\SupportIdentity;
+use Plugin\ChatwootSync\Services\SupportUsage;
 
 class WebsiteSupportController extends Controller
 {
@@ -23,9 +25,7 @@ class WebsiteSupportController extends Controller
             'orders' => $commerce->orders($user, $request->validate([
                 'trade_no' => ['nullable', 'string', 'max:64', 'regex:/^[A-Za-z0-9_-]+$/D'],
             ])['trade_no'] ?? null),
-            'connection' => app(SupportConnection::class)->diagnose($user, $request->validate([
-                'node' => ['nullable', 'string', 'max:80'],
-            ])['node'] ?? null),
+            'connection' => $this->connection($request, $user),
             'offers' => $commerce->offers($user),
             'quote' => $commerce->quote($user, $this->quoteSelection($request)),
         };
@@ -35,6 +35,18 @@ class WebsiteSupportController extends Controller
             'checked_at' => now()->toIso8601String(),
             'data' => $data,
         ])->header('Cache-Control', 'private, no-store');
+    }
+
+    private function connection(Request $request, User $user): array
+    {
+        $filters = $request->validate([
+            'node' => ['nullable', 'string', 'max:80'],
+            'detail' => ['nullable', 'string', 'in:usage'],
+        ]);
+        if (($filters['detail'] ?? null) === 'usage') {
+            return app(SupportUsage::class)->describe($user);
+        }
+        return app(SupportConnection::class)->diagnose($user, $filters['node'] ?? null);
     }
 
     private function plans(Request $request, SupportCommerce $commerce): array

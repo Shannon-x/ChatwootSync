@@ -33,11 +33,12 @@ class WebsiteCustomerFlowTest extends TestCase
             'chatwoot_base_url' => 'https://support.example.test', 'chatwoot_api_token' => 'test-agent',
         ]);
         $source = (string) Str::uuid();
-        Http::fake(['https://support.example.test/api/v1/accounts/1/conversations/44' => Http::response([
+        Http::fake(['https://support.example.test/api/v1/accounts/1/conversations/44*' => Http::response([
             'id' => 44, 'account_id' => 1, 'inbox_id' => 3,
             'meta' => ['channel' => 'Channel::WebWidget', 'sender' => ['id' => 18, 'email' => 'one@example.test', 'identifier' => 'one@example.test']],
-            'messages' => [['id' => 71, 'conversation_id' => 44, 'message_type' => 0, 'sender_type' => 'Contact', 'sender_id' => 18,
-                'additional_attributes' => ['widget_sender_source_digest' => hash('sha256', $source)]]],
+            'messages' => [['id' => 74, 'message_type' => 2]],
+            'last_non_activity_message' => ['id' => 73, 'message_type' => 1],
+            'latest_widget_message_proof' => ['id' => 71, 'conversation_id' => 44, 'contact_id' => 18, 'source_digest' => hash('sha256', $source)],
         ])]);
         $group = new ServerGroup();
         $group->name = 'Public line';
@@ -55,6 +56,7 @@ class WebsiteCustomerFlowTest extends TestCase
         $base = '/api/v1/plugin/chatwoot/support';
         $this->getJson("$base/plans", $headers)->assertOk()->assertJsonPath('data.plans.0.prices.0.price_yuan', '12.00');
         $this->getJson("$base/orders", $headers)->assertForbidden();
+        $this->getJson("$base/connection?detail=usage", $headers)->assertForbidden();
         $headers['X-Chatwoot-Responding-To-Message-Id'] = '71';
         $owner = User::findByExactEmail('one@example.test');
         $token = $owner->createToken('panel', ['user'])->accessToken;
@@ -63,7 +65,13 @@ class WebsiteCustomerFlowTest extends TestCase
         $this->getJson("$base/orders", $headers)->assertOk()->assertJsonCount(1, 'data.orders')->assertJsonPath('data.orders.0.order_reference', 'pt-one')->assertJsonMissingPath('data.orders.0.trade_no');
         $this->getJson("$base/orders?trade_no=receipt-two", $headers)->assertOk()->assertJsonCount(0, 'data.orders');
         $this->getJson("$base/quote?period=monthly&plan_id=$plan->id", $headers)->assertOk()->assertJsonPath('data.price_yuan', '12.00');
+        $this->getJson("$base/connection?detail=usage&user_id=777", $headers)
+            ->assertOk()->assertJsonCount(3, 'data.months')->assertJsonPath('data.wallet', null);
+        $this->getJson("$base/connection?detail=other", $headers)->assertUnprocessable();
+        $olderTurn = array_replace($headers, ['X-Chatwoot-Responding-To-Message-Id' => '70']);
+        $this->getJson("$base/orders", $olderTurn)->assertForbidden();
         $token->delete();
+        $this->getJson("$base/connection?detail=usage", $headers)->assertForbidden();
         $this->getJson("$base/orders", $headers)->assertForbidden();
         self::assertSame(2, Order::count());
     }

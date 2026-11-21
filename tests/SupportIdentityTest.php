@@ -2,12 +2,16 @@
 
 namespace Plugin\ChatwootSync\Tests;
 
+use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request as ClientRequest;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Str;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Plugin\ChatwootSync\Services\SupportIdentity;
+use Plugin\ChatwootSync\Services\WebsitePanelSession;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 use Tests\TestCase;
 
@@ -64,11 +68,12 @@ class SupportIdentityTest extends TestCase
 
     public function test_anonymous_website_session_can_read_public_catalog_only(): void
     {
-        Http::fake([self::CHAT_URL => Http::response(self::CONVERSATION)]);
+        Http::fake([self::CHAT_URL . '*' => Http::response(self::CONVERSATION)]);
         $request = $this->request();
         self::assertNull((new SupportIdentity())->authorize($request, self::CONFIG, false));
         $this->assertDenied(403, $request);
         Http::assertSentCount(2);
+        Http::assertSent(fn (ClientRequest $request) => $request->url() === self::CHAT_URL . '?include_latest_widget_message_proof=1');
         Http::assertSent(fn (ClientRequest $request) =>
             $request->url() === self::CHAT_URL && $request->hasHeader('api_access_token', 'test-client-secret'));
     }
@@ -96,7 +101,7 @@ class SupportIdentityTest extends TestCase
     #[DataProvider('conflictingConversations')]
     public function test_real_conversation_must_match_the_caller(array $changes): void
     {
-        Http::fake([self::CHAT_URL => Http::response(array_replace_recursive(self::CONVERSATION, $changes))]);
+        Http::fake([self::CHAT_URL . '*' => Http::response(array_replace_recursive(self::CONVERSATION, $changes))]);
         $this->assertDenied(403, $this->request(), false);
     }
 
@@ -113,18 +118,33 @@ class SupportIdentityTest extends TestCase
 
     public function test_upstream_failure_never_grants_access(): void
     {
-        Http::fake([self::CHAT_URL => Http::response([], 500)]);
+        Http::fake([self::CHAT_URL . '*' => Http::response([], 500)]);
         $this->assertDenied(503, $this->request(), false);
     }
 
     #[DataProvider('untrustedMessages')]
-    public function test_private_data_requires_a_server_record_of_the_exact_incoming_message(array $overrides): void
+    public function test_private_data_requires_a_server_record_of_the_exact_incoming_message(?array $overrides, bool $activeSession = true): void
     {
-        $message = array_replace([
-            'id' => 87, 'message_type' => 0, 'conversation_id' => 31,
-            'sender_id' => 19, 'sender_type' => 'Contact', 'additional_attributes' => [],
+        config(['cache.stores.redis' => ['driver' => 'array']]);
+        Cache::forgetDriver('redis');
+        $source = (string) Str::uuid();
+        $digest = hash('sha256', $source);
+        $email = 'customer@example.test';
+        if ($activeSession) {
+            $user = User::create(['email' => $email, 'password' => 'unused', 'uuid' => (string) Str::uuid(), 'token' => Str::random(32)]);
+            $user->withAccessToken($user->createToken('panel', ['user'])->accessToken);
+            app(WebsitePanelSession::class)->bind($user, $source, $email, 7);
+        }
+        $proof = $overrides === null ? null : array_replace([
+            'id' => 87, 'conversation_id' => 31, 'contact_id' => 19, 'source_digest' => $digest,
         ], $overrides);
-        Http::fake([self::CHAT_URL => Http::response(self::CONVERSATION + ['messages' => [$message]])]);
+        $legacy = ['id' => 87, 'message_type' => 0, 'conversation_id' => 31, 'sender_type' => 'Contact', 'sender_id' => 19,
+            'additional_attributes' => ['widget_sender_source_digest' => $digest]];
+        $conversation = self::CONVERSATION;
+        $conversation['meta']['sender']['identifier'] = $email;
+        Http::fake([self::CHAT_URL . '?include_latest_widget_message_proof=1' => Http::response($conversation + [
+            'messages' => [$legacy], 'last_non_activity_message' => $legacy, 'latest_widget_message_proof' => $proof,
+        ])]);
         $this->assertDenied(403, $this->request([
             'X-Chatwoot-Responding-To-Message-Id' => '87',
             'X-Chatwoot-Verified-Email' => 'customer@example.test',
@@ -135,11 +155,12 @@ class SupportIdentityTest extends TestCase
     {
         return [
             'other message' => [['id' => 88]],
-            'other contact' => [['sender_id' => 20]],
+            'other contact' => [['contact_id' => 20]],
             'different conversation' => [['conversation_id' => 1]],
-            'non-customer sender' => [['sender_type' => 'User']],
-            'outgoing' => [['message_type' => 1]],
-            'email verification without a panel login' => [[]],
+            'unsigned latest turn despite a signed legacy message' => [null],
+            'empty proof' => [['source_digest' => '']],
+            'malformed proof' => [['source_digest' => 'invalid']],
+            'no live panel session' => [[], false],
         ];
     }
 }

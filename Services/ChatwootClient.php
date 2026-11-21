@@ -102,11 +102,12 @@ class ChatwootClient
         ];
     }
 
-    public function getConversation(int $displayId): ?array
+    public function getConversation(int $displayId, bool $includeWidgetProof = false): ?array
     {
         try {
             $response = $this->request()->withoutRedirecting()->connectTimeout(2)->timeout(5)->retry(1, throw: false)
-                ->get("{$this->baseUrl}/api/v1/accounts/{$this->accountId}/conversations/{$displayId}");
+                ->get("{$this->baseUrl}/api/v1/accounts/{$this->accountId}/conversations/{$displayId}",
+                    $includeWidgetProof ? ['include_latest_widget_message_proof' => '1'] : []);
         } catch (\Illuminate\Http\Client\ConnectionException) {
             abort(503, 'Website conversation verification is temporarily unavailable.');
         }
